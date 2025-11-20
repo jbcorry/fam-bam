@@ -1,98 +1,221 @@
-import { Image } from 'expo-image';
-import { Platform, StyleSheet } from 'react-native';
+import { useMemo, useState } from 'react';
+import {
+  SafeAreaView,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
+} from 'react-native';
 
-import { HelloWave } from '@/components/hello-wave';
-import ParallaxScrollView from '@/components/parallax-scroll-view';
-import { ThemedText } from '@/components/themed-text';
-import { ThemedView } from '@/components/themed-view';
-import { Link } from 'expo-router';
+const initialPlayers = ['Avery', 'Jordan', 'Noor'];
 
 export default function HomeScreen() {
-  return (
-    <ParallaxScrollView
-      headerBackgroundColor={{ light: '#A1CEDC', dark: '#1D3D47' }}
-      headerImage={
-        <Image
-          source={require('@/assets/images/partial-react-logo.png')}
-          style={styles.reactLogo}
-        />
-      }>
-      <ThemedView style={styles.titleContainer}>
-        <ThemedText type="title">Welcome!</ThemedText>
-        <HelloWave />
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 1: Try it</ThemedText>
-        <ThemedText>
-          Edit <ThemedText type="defaultSemiBold">app/(tabs)/index.tsx</ThemedText> to see changes.
-          Press{' '}
-          <ThemedText type="defaultSemiBold">
-            {Platform.select({
-              ios: 'cmd + d',
-              android: 'cmd + m',
-              web: 'F12',
-            })}
-          </ThemedText>{' '}
-          to open developer tools.
-        </ThemedText>
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <Link href="/modal">
-          <Link.Trigger>
-            <ThemedText type="subtitle">Step 2: Explore</ThemedText>
-          </Link.Trigger>
-          <Link.Preview />
-          <Link.Menu>
-            <Link.MenuAction title="Action" icon="cube" onPress={() => alert('Action pressed')} />
-            <Link.MenuAction
-              title="Share"
-              icon="square.and.arrow.up"
-              onPress={() => alert('Share pressed')}
-            />
-            <Link.Menu title="More" icon="ellipsis">
-              <Link.MenuAction
-                title="Delete"
-                icon="trash"
-                destructive
-                onPress={() => alert('Delete pressed')}
-              />
-            </Link.Menu>
-          </Link.Menu>
-        </Link>
+  const [players, setPlayers] = useState<string[]>(initialPlayers);
+  const [activePlayerIndex, setActivePlayerIndex] = useState(0);
+  const [storyWords, setStoryWords] = useState<string[]>([]);
+  const [wordInput, setWordInput] = useState('');
+  const [newPlayerInput, setNewPlayerInput] = useState('');
 
-        <ThemedText>
-          {`Tap the Explore tab to learn more about what's included in this starter app.`}
-        </ThemedText>
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 3: Get a fresh start</ThemedText>
-        <ThemedText>
-          {`When you're ready, run `}
-          <ThemedText type="defaultSemiBold">npm run reset-project</ThemedText> to get a fresh{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> directory. This will move the current{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> to{' '}
-          <ThemedText type="defaultSemiBold">app-example</ThemedText>.
-        </ThemedText>
-      </ThemedView>
-    </ParallaxScrollView>
+  const hasPlayers = players.length > 0;
+  const activePlayer = hasPlayers ? players[activePlayerIndex] : 'Waiting for players';
+  const canSubmitWord = hasPlayers && Boolean(wordInput.trim());
+  const canAddPlayer = Boolean(newPlayerInput.trim());
+
+  const storyText = useMemo(
+    () => (storyWords.length ? `${storyWords.join(' ')}.` : 'No story yet. Add the first word!'),
+    [storyWords]
+  );
+
+  const handleAddWord = () => {
+    if (!canSubmitWord) return;
+
+    setStoryWords((prev) => [...prev, wordInput.trim()]);
+    setWordInput('');
+    setActivePlayerIndex((prev) => (players.length ? (prev + 1) % players.length : 0));
+  };
+
+  const handleAddPlayer = () => {
+    if (!canAddPlayer) return;
+    setPlayers((prev) => [...prev, newPlayerInput.trim()]);
+    setNewPlayerInput('');
+  };
+
+  const handleResetStory = () => {
+    setStoryWords([]);
+    setActivePlayerIndex(0);
+  };
+
+  return (
+    <SafeAreaView style={styles.safeArea}>
+      <ScrollView contentContainerStyle={styles.container}>
+        <Text style={styles.title}>Pass-the-Word Story</Text>
+        <Text style={styles.subtitle}>
+          Keep the creativity flowing by letting only one friend add a word at a time.
+        </Text>
+
+        <Card title="Story so far">
+          <Text style={styles.story}>{storyText}</Text>
+          <Text style={styles.hint}>Hint: short, unexpected words keep the tale ridiculous.</Text>
+          <ActionButton label="Reset story" onPress={handleResetStory} disabled={!storyWords.length} />
+        </Card>
+
+        <Card title="Current turn">
+          <Text style={styles.activePlayer}>{activePlayer}</Text>
+          <TextInput
+            value={wordInput}
+            onChangeText={setWordInput}
+            placeholder="Type a single word"
+            style={styles.input}
+            autoCapitalize="none"
+            autoCorrect={false}
+            onSubmitEditing={handleAddWord}
+            editable={hasPlayers}
+          />
+          <ActionButton label="Add word" onPress={handleAddWord} disabled={!canSubmitWord} />
+        </Card>
+
+        <Card title="Players">
+          <View style={styles.badgeRow}>
+            {players.map((player, index) => (
+              <View
+                key={`${player}-${index}`}
+                style={[styles.badge, index === activePlayerIndex && styles.badgeActive]}>
+                <Text style={styles.badgeText}>{player}</Text>
+              </View>
+            ))}
+            {!players.length && <Text>No players yet. Add a name below.</Text>}
+          </View>
+          <TextInput
+            value={newPlayerInput}
+            onChangeText={setNewPlayerInput}
+            placeholder="Add new player"
+            style={styles.input}
+            onSubmitEditing={handleAddPlayer}
+          />
+          <ActionButton label="Add player" onPress={handleAddPlayer} disabled={!canAddPlayer} />
+        </Card>
+      </ScrollView>
+    </SafeAreaView>
+  );
+}
+
+type CardProps = {
+  title: string;
+  children: React.ReactNode;
+};
+
+function Card({ title, children }: CardProps) {
+  return (
+    <View style={styles.card}>
+      <Text style={styles.cardTitle}>{title}</Text>
+      {children}
+    </View>
+  );
+}
+
+type ActionButtonProps = {
+  label: string;
+  onPress: () => void;
+  disabled?: boolean;
+};
+
+function ActionButton({ label, onPress, disabled }: ActionButtonProps) {
+  return (
+    <TouchableOpacity
+      accessibilityRole="button"
+      onPress={disabled ? undefined : onPress}
+      style={[styles.button, disabled && styles.buttonDisabled]}
+      activeOpacity={0.8}
+      disabled={disabled}>
+      <Text style={styles.buttonText}>{label}</Text>
+    </TouchableOpacity>
   );
 }
 
 const styles = StyleSheet.create({
-  titleContainer: {
+  safeArea: {
+    flex: 1,
+    backgroundColor: '#f4f5f7',
+  },
+  container: {
+    padding: 24,
+    gap: 20,
+  },
+  title: {
+    fontSize: 28,
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+  subtitle: {
+    textAlign: 'center',
+    color: '#555',
+    marginBottom: 4,
+  },
+  card: {
+    backgroundColor: '#fff',
+    borderRadius: 16,
+    padding: 16,
+    gap: 12,
+    shadowColor: '#000',
+    shadowOpacity: 0.04,
+    shadowRadius: 6,
+    elevation: 1,
+  },
+  cardTitle: {
+    fontSize: 18,
+    fontWeight: '600',
+  },
+  story: {
+    lineHeight: 20,
+  },
+  hint: {
+    fontSize: 12,
+    color: '#777',
+  },
+  activePlayer: {
+    fontSize: 32,
+    fontWeight: '700',
+  },
+  input: {
+    borderWidth: 1,
+    borderColor: '#d7d7d7',
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    backgroundColor: '#fdfdfd',
+  },
+  badgeRow: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  badge: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#d7d7d7',
+  },
+  badgeActive: {
+    backgroundColor: '#e6f9ff',
+    borderColor: '#00a8c7',
+  },
+  badgeText: {
+    fontWeight: '600',
+  },
+  button: {
+    borderRadius: 10,
+    paddingVertical: 12,
     alignItems: 'center',
-    gap: 8,
+    backgroundColor: '#1d3d47',
   },
-  stepContainer: {
-    gap: 8,
-    marginBottom: 8,
+  buttonDisabled: {
+    backgroundColor: '#9fb2b9',
   },
-  reactLogo: {
-    height: 178,
-    width: 290,
-    bottom: 0,
-    left: 0,
-    position: 'absolute',
+  buttonText: {
+    color: '#fff',
+    fontWeight: '600',
   },
 });
