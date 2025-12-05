@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
   SafeAreaView,
   ScrollView,
@@ -8,20 +8,64 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
+import * as WebBrowser from 'expo-web-browser';
+import * as Google from 'expo-auth-session/providers/google';
+import {
+  GoogleAuthProvider,
+  createUserWithEmailAndPassword,
+  linkWithCredential,
+  onAuthStateChanged,
+  signInWithCredential,
+  signInWithEmailAndPassword,
+  signOut,
+  updateProfile,
+  type User,
+} from 'firebase/auth';
 
-const initialPlayers = ['Avery', 'Jordan', 'Noor'];
+import {
+  addPlayerToSession,
+  addWordToSession,
+  ensureSessionExists,
+  Player,
+  resetSessionStory,
+  subscribeToSession,
+  type StorySessionState,
+} from '@/lib/story-session';
+import { getFirebaseAuth } from '@/lib/firebase';
+
+WebBrowser.maybeCompleteAuthSession();
+const sessionId = 'shared-story';
 
 export default function HomeScreen() {
-  const [players, setPlayers] = useState<string[]>(initialPlayers);
+  const [players, setPlayers] = useState<Player[]>([]);
   const [activePlayerIndex, setActivePlayerIndex] = useState(0);
   const [storyWords, setStoryWords] = useState<string[]>([]);
   const [wordInput, setWordInput] = useState('');
   const [newPlayerInput, setNewPlayerInput] = useState('');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [displayName, setDisplayName] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [user, setUser] = useState<User | null>(null);
+
+  const auth = getFirebaseAuth();
+  const [googleRequest, googleResponse, promptGoogle] = Google.useIdTokenAuthRequest({
+    expoClientId: process.env.EXPO_PUBLIC_GOOGLE_EXPO_CLIENT_ID,
+    iosClientId: process.env.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID,
+    androidClientId: process.env.EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID,
+    webClientId: process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID,
+  });
 
   const hasPlayers = players.length > 0;
-  const activePlayer = hasPlayers ? players[activePlayerIndex] : 'Waiting for players';
-  const canSubmitWord = hasPlayers && Boolean(wordInput.trim());
-  const canAddPlayer = Boolean(newPlayerInput.trim());
+  const activePlayer = hasPlayers ? players[activePlayerIndex] : null;
+  const isActivePlayer = user && activePlayer && activePlayer.id === user.uid;
+  const sanitizedWord = wordInput.trim();
+  const isSingleWord = Boolean(sanitizedWord) && !/\s/.test(sanitizedWord);
+  const wordValidationMessage =
+    wordInput.length && !isSingleWord ? 'Please enter only one word (no spaces).' : null;
+  const canSubmitWord = hasPlayers && isSingleWord && Boolean(isActivePlayer);
+  const canAddPlayer = Boolean(user);
 
   const storyText = useMemo(
     () => (storyWords.length ? `${storyWords.join(' ')}.` : 'No story yet. Add the first word!'),
@@ -31,29 +75,194 @@ export default function HomeScreen() {
   const handleAddWord = () => {
     if (!canSubmitWord) return;
 
-    setStoryWords((prev) => [...prev, wordInput.trim()]);
+    const nextWord = sanitizedWord;
     setWordInput('');
-    setActivePlayerIndex((prev) => (players.length ? (prev + 1) % players.length : 0));
+    addWordToSession(sessionId, nextWord).catch((firebaseError) =>
+      setError(firebaseError instanceof Error ? firebaseError.message : 'Could not add word.')
+    );
   };
 
   const handleAddPlayer = () => {
-    if (!canAddPlayer) return;
-    setPlayers((prev) => [...prev, newPlayerInput.trim()]);
+    if (!user || !canAddPlayer) return;
+    const name = newPlayerInput.trim() || user.displayName || user.email || 'Player';
     setNewPlayerInput('');
+
+    addPlayerToSession(sessionId, { id: user.uid, name }).catch((firebaseError) =>
+      setError(firebaseError instanceof Error ? firebaseError.message : 'Could not add player.')
+    );
   };
 
   const handleResetStory = () => {
-    setStoryWords([]);
-    setActivePlayerIndex(0);
+    resetSessionStory(sessionId).catch((firebaseError) =>
+      setError(firebaseError instanceof Error ? firebaseError.message : 'Could not reset story.')
+    );
   };
+
+  useEffect(() => {
+    const unsubscribeAuth = onAuthStateChanged(auth, (nextUser) => {
+      setUser(nextUser);
+    });
+
+    return () => unsubscribeAuth();
+  }, [auth]);
+
+  useEffect(() => {
+    if (googleResponse?.type === 'success') {
+      const idToken = googleResponse.params.id_token;
+      if (!idToken) {
+        setError('Google sign-in failed: missing token.');
+        return;
+      }
+      const credential = GoogleAuthProvider.credential(idToken);
+      const action = user ? linkWithCredential(user, credential) : signInWithCredential(auth, credential);
+      action.catch((firebaseError) => {
+        setError(firebaseError instanceof Error ? firebaseError.message : 'Google sign-in failed.');
+      });
+    }
+  }, [googleResponse, auth, user]);
+
+  useEffect(() => {
+    let unsubscribe: (() => void) | undefined;
+    let isMounted = true;
+
+    const bootstrap = async () => {
+      try {
+        await ensureSessionExists(sessionId, { players: [], storyWords: [], activePlayerIndex: 0 });
+
+        if (!isMounted) return;
+
+        unsubscribe = subscribeToSession(
+          sessionId,
+          (session: StorySessionState) => {
+            setPlayers(session.players);
+            setStoryWords(session.storyWords);
+            setActivePlayerIndex(session.activePlayerIndex);
+          },
+          (firebaseError) => {
+            setError(firebaseError.message);
+          }
+        );
+      } catch (firebaseError) {
+        if (firebaseError instanceof Error) {
+          setError(firebaseError.message);
+        } else {
+          setError('Could not connect to Firebase. Check your config.');
+        }
+      } finally {
+        if (isMounted) {
+          setLoading(false);
+        }
+      }
+    };
+
+    bootstrap();
+
+    return () => {
+      isMounted = false;
+      unsubscribe?.();
+    };
+  }, []);
+
+  const handleRegister = async () => {
+    setError(null);
+    const name = displayName.trim();
+    if (!name) {
+      setError('Display name is required to sign up.');
+      return;
+    }
+    try {
+      const result = await createUserWithEmailAndPassword(auth, email.trim(), password);
+      await updateProfile(result.user, { displayName: name });
+    } catch (firebaseError) {
+      setError(firebaseError instanceof Error ? firebaseError.message : 'Could not sign up.');
+    }
+  };
+
+  const handleLogin = async () => {
+    setError(null);
+    try {
+      await signInWithEmailAndPassword(auth, email.trim(), password);
+    } catch (firebaseError) {
+      setError(firebaseError instanceof Error ? firebaseError.message : 'Could not sign in.');
+    }
+  };
+
+  const handleLogout = async () => {
+    setError(null);
+    try {
+      await signOut(auth);
+    } catch (firebaseError) {
+      setError(firebaseError instanceof Error ? firebaseError.message : 'Could not sign out.');
+    }
+  };
+
+  if (loading) {
+    return (
+      <SafeAreaView style={styles.safeArea}>
+        <View style={[styles.container, styles.centered]}>
+          <Text style={styles.title}>Loading story...</Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   return (
     <SafeAreaView style={styles.safeArea}>
       <ScrollView contentContainerStyle={styles.container}>
+        {error && <Text style={styles.error}>{error}</Text>}
         <Text style={styles.title}>Pass-the-Word Story</Text>
         <Text style={styles.subtitle}>
           Keep the creativity flowing by letting only one friend add a word at a time.
         </Text>
+
+        <Card title="Authentication">
+          {user ? (
+            <>
+              <Text>Signed in as {user.displayName || user.email}</Text>
+              <ButtonRow>
+                <ActionButton label="Link Google" onPress={() => promptGoogle()} disabled={!googleRequest} />
+                <ActionButton label="Sign out" onPress={handleLogout} />
+              </ButtonRow>
+            </>
+          ) : (
+            <>
+              <TextInput
+                value={email}
+                onChangeText={setEmail}
+                placeholder="Email"
+                style={styles.input}
+                autoCapitalize="none"
+                keyboardType="email-address"
+              />
+              <TextInput
+                value={password}
+                onChangeText={setPassword}
+                placeholder="Password"
+                secureTextEntry
+                style={styles.input}
+              />
+              <TextInput
+                value={displayName}
+                onChangeText={setDisplayName}
+                placeholder="Display name"
+                style={styles.input}
+              />
+              <ButtonRow>
+                <ActionButton
+                  label="Sign up"
+                  onPress={handleRegister}
+                  disabled={!email || !password || !displayName.trim()}
+                />
+                <ActionButton label="Sign in" onPress={handleLogin} disabled={!email || !password} />
+              </ButtonRow>
+              <ActionButton
+                label="Sign in with Google"
+                onPress={() => promptGoogle()}
+                disabled={!googleRequest}
+              />
+            </>
+          )}
+        </Card>
 
         <Card title="Story so far">
           <Text style={styles.story}>{storyText}</Text>
@@ -62,7 +271,12 @@ export default function HomeScreen() {
         </Card>
 
         <Card title="Current turn">
-          <Text style={styles.activePlayer}>{activePlayer}</Text>
+          <Text style={styles.activePlayer}>{activePlayer?.name ?? 'Waiting for players'}</Text>
+          {!isActivePlayer && (
+            <Text style={styles.hint}>
+              Only the active player can add a word. Sign in as {activePlayer?.name ?? 'a player'} to continue.
+            </Text>
+          )}
           <TextInput
             value={wordInput}
             onChangeText={setWordInput}
@@ -73,6 +287,7 @@ export default function HomeScreen() {
             onSubmitEditing={handleAddWord}
             editable={hasPlayers}
           />
+          {wordValidationMessage && <Text style={styles.validationError}>{wordValidationMessage}</Text>}
           <ActionButton label="Add word" onPress={handleAddWord} disabled={!canSubmitWord} />
         </Card>
 
@@ -80,9 +295,9 @@ export default function HomeScreen() {
           <View style={styles.badgeRow}>
             {players.map((player, index) => (
               <View
-                key={`${player}-${index}`}
+                key={`${player.id}-${index}`}
                 style={[styles.badge, index === activePlayerIndex && styles.badgeActive]}>
-                <Text style={styles.badgeText}>{player}</Text>
+                <Text style={styles.badgeText}>{player.name}</Text>
               </View>
             ))}
             {!players.length && <Text>No players yet. Add a name below.</Text>}
@@ -103,7 +318,7 @@ export default function HomeScreen() {
 
 type CardProps = {
   title: string;
-  children: React.ReactNode;
+  children: ReactNode;
 };
 
 function Card({ title, children }: CardProps) {
@@ -134,6 +349,10 @@ function ActionButton({ label, onPress, disabled }: ActionButtonProps) {
   );
 }
 
+function ButtonRow({ children }: { children: ReactNode }) {
+  return <View style={styles.buttonRow}>{children}</View>;
+}
+
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
@@ -147,6 +366,10 @@ const styles = StyleSheet.create({
     fontSize: 28,
     fontWeight: '700',
     textAlign: 'center',
+  },
+  centered: {
+    flex: 1,
+    justifyContent: 'center',
   },
   subtitle: {
     textAlign: 'center',
@@ -162,6 +385,10 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.04,
     shadowRadius: 6,
     elevation: 1,
+  },
+  error: {
+    color: '#b00020',
+    textAlign: 'center',
   },
   cardTitle: {
     fontSize: 18,
@@ -205,6 +432,10 @@ const styles = StyleSheet.create({
   badgeText: {
     fontWeight: '600',
   },
+  buttonRow: {
+    flexDirection: 'row',
+    gap: 10,
+  },
   button: {
     borderRadius: 10,
     paddingVertical: 12,
@@ -217,5 +448,9 @@ const styles = StyleSheet.create({
   buttonText: {
     color: '#fff',
     fontWeight: '600',
+  },
+  validationError: {
+    color: '#b00020',
+    fontSize: 12,
   },
 });
