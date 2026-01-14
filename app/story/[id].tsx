@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   SafeAreaView,
   ScrollView,
@@ -8,54 +8,90 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import * as WebBrowser from 'expo-web-browser';
-import * as Google from 'expo-auth-session/providers/google';
-import {
-  GoogleAuthProvider,
-  createUserWithEmailAndPassword,
-  linkWithCredential,
-  onAuthStateChanged,
-  signInWithCredential,
-  signInWithEmailAndPassword,
-  signOut,
-  updateProfile,
-  type User,
-} from 'firebase/auth';
+import { onAuthStateChanged, type User } from 'firebase/auth';
+import { useLocalSearchParams } from 'expo-router';
 
 import {
   addPlayerToSession,
   addWordToSession,
   ensureSessionExists,
-  Player,
   resetSessionStory,
   subscribeToSession,
+  type Player,
   type StorySessionState,
 } from '@/lib/story-session';
 import { getFirebaseAuth } from '@/lib/firebase';
 
-WebBrowser.maybeCompleteAuthSession();
-const sessionId = 'shared-story';
+export default function StoryDetailScreen() {
+  const params = useLocalSearchParams<{ id?: string | string[] }>();
+  const sessionIdParam = Array.isArray(params.id) ? params.id[0] : params.id;
+  const sessionId = sessionIdParam ?? '';
 
-export default function HomeScreen() {
   const [players, setPlayers] = useState<Player[]>([]);
   const [activePlayerIndex, setActivePlayerIndex] = useState(0);
   const [storyWords, setStoryWords] = useState<string[]>([]);
   const [wordInput, setWordInput] = useState('');
   const [newPlayerInput, setNewPlayerInput] = useState('');
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [displayName, setDisplayName] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [user, setUser] = useState<User | null>(null);
 
   const auth = getFirebaseAuth();
-  const [googleRequest, googleResponse, promptGoogle] = Google.useIdTokenAuthRequest({
-    expoClientId: process.env.EXPO_PUBLIC_GOOGLE_EXPO_CLIENT_ID,
-    iosClientId: process.env.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID,
-    androidClientId: process.env.EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID,
-    webClientId: process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID,
-  });
+
+  useEffect(() => {
+    const unsubscribeAuth = onAuthStateChanged(auth, (nextUser) => {
+      setUser(nextUser);
+    });
+
+    return () => unsubscribeAuth();
+  }, [auth]);
+
+  useEffect(() => {
+    if (!sessionId) {
+      setError('No story id provided.');
+      return;
+    }
+
+    let unsubscribe: (() => void) | undefined;
+    let isMounted = true;
+
+    const bootstrap = async () => {
+      try {
+        await ensureSessionExists(sessionId, { players: [], storyWords: [], activePlayerIndex: 0 });
+
+        if (!isMounted) return;
+
+        unsubscribe = subscribeToSession(
+          sessionId,
+          (session: StorySessionState) => {
+            setPlayers(session.players);
+            setStoryWords(session.storyWords);
+            setActivePlayerIndex(session.activePlayerIndex);
+          },
+          (firebaseError) => {
+            setError(firebaseError.message);
+          }
+        );
+      } catch (firebaseError) {
+        if (firebaseError instanceof Error) {
+          setError(firebaseError.message);
+        } else {
+          setError('Could not connect to Firebase. Check your config.');
+        }
+      } finally {
+        if (isMounted) {
+          setLoading(false);
+        }
+      }
+    };
+
+    bootstrap();
+
+    return () => {
+      isMounted = false;
+      unsubscribe?.();
+    };
+  }, [sessionId]);
 
   const hasPlayers = players.length > 0;
   const activePlayer = hasPlayers ? players[activePlayerIndex] : null;
@@ -98,104 +134,6 @@ export default function HomeScreen() {
     );
   };
 
-  useEffect(() => {
-    const unsubscribeAuth = onAuthStateChanged(auth, (nextUser) => {
-      setUser(nextUser);
-    });
-
-    return () => unsubscribeAuth();
-  }, [auth]);
-
-  useEffect(() => {
-    if (googleResponse?.type === 'success') {
-      const idToken = googleResponse.params.id_token;
-      if (!idToken) {
-        setError('Google sign-in failed: missing token.');
-        return;
-      }
-      const credential = GoogleAuthProvider.credential(idToken);
-      const action = user ? linkWithCredential(user, credential) : signInWithCredential(auth, credential);
-      action.catch((firebaseError) => {
-        setError(firebaseError instanceof Error ? firebaseError.message : 'Google sign-in failed.');
-      });
-    }
-  }, [googleResponse, auth, user]);
-
-  useEffect(() => {
-    let unsubscribe: (() => void) | undefined;
-    let isMounted = true;
-
-    const bootstrap = async () => {
-      try {
-        await ensureSessionExists(sessionId, { players: [], storyWords: [], activePlayerIndex: 0 });
-
-        if (!isMounted) return;
-
-        unsubscribe = subscribeToSession(
-          sessionId,
-          (session: StorySessionState) => {
-            setPlayers(session.players);
-            setStoryWords(session.storyWords);
-            setActivePlayerIndex(session.activePlayerIndex);
-          },
-          (firebaseError) => {
-            setError(firebaseError.message);
-          }
-        );
-      } catch (firebaseError) {
-        if (firebaseError instanceof Error) {
-          setError(firebaseError.message);
-        } else {
-          setError('Could not connect to Firebase. Check your config.');
-        }
-      } finally {
-        if (isMounted) {
-          setLoading(false);
-        }
-      }
-    };
-
-    bootstrap();
-
-    return () => {
-      isMounted = false;
-      unsubscribe?.();
-    };
-  }, []);
-
-  const handleRegister = async () => {
-    setError(null);
-    const name = displayName.trim();
-    if (!name) {
-      setError('Display name is required to sign up.');
-      return;
-    }
-    try {
-      const result = await createUserWithEmailAndPassword(auth, email.trim(), password);
-      await updateProfile(result.user, { displayName: name });
-    } catch (firebaseError) {
-      setError(firebaseError instanceof Error ? firebaseError.message : 'Could not sign up.');
-    }
-  };
-
-  const handleLogin = async () => {
-    setError(null);
-    try {
-      await signInWithEmailAndPassword(auth, email.trim(), password);
-    } catch (firebaseError) {
-      setError(firebaseError instanceof Error ? firebaseError.message : 'Could not sign in.');
-    }
-  };
-
-  const handleLogout = async () => {
-    setError(null);
-    try {
-      await signOut(auth);
-    } catch (firebaseError) {
-      setError(firebaseError instanceof Error ? firebaseError.message : 'Could not sign out.');
-    }
-  };
-
   if (loading) {
     return (
       <SafeAreaView style={styles.safeArea}>
@@ -210,59 +148,8 @@ export default function HomeScreen() {
     <SafeAreaView style={styles.safeArea}>
       <ScrollView contentContainerStyle={styles.container}>
         {error && <Text style={styles.error}>{error}</Text>}
-        <Text style={styles.title}>Pass-the-Word Story</Text>
-        <Text style={styles.subtitle}>
-          Keep the creativity flowing by letting only one friend add a word at a time.
-        </Text>
-
-        <Card title="Authentication">
-          {user ? (
-            <>
-              <Text>Signed in as {user.displayName || user.email}</Text>
-              <ButtonRow>
-                <ActionButton label="Link Google" onPress={() => promptGoogle()} disabled={!googleRequest} />
-                <ActionButton label="Sign out" onPress={handleLogout} />
-              </ButtonRow>
-            </>
-          ) : (
-            <>
-              <TextInput
-                value={email}
-                onChangeText={setEmail}
-                placeholder="Email"
-                style={styles.input}
-                autoCapitalize="none"
-                keyboardType="email-address"
-              />
-              <TextInput
-                value={password}
-                onChangeText={setPassword}
-                placeholder="Password"
-                secureTextEntry
-                style={styles.input}
-              />
-              <TextInput
-                value={displayName}
-                onChangeText={setDisplayName}
-                placeholder="Display name"
-                style={styles.input}
-              />
-              <ButtonRow>
-                <ActionButton
-                  label="Sign up"
-                  onPress={handleRegister}
-                  disabled={!email || !password || !displayName.trim()}
-                />
-                <ActionButton label="Sign in" onPress={handleLogin} disabled={!email || !password} />
-              </ButtonRow>
-              <ActionButton
-                label="Sign in with Google"
-                onPress={() => promptGoogle()}
-                disabled={!googleRequest}
-              />
-            </>
-          )}
-        </Card>
+        <Text style={styles.title}>Story: {sessionId}</Text>
+        <Text style={styles.subtitle}>Contribute words and manage players for this story.</Text>
 
         <Card title="Story so far">
           <Text style={styles.story}>{storyText}</Text>
@@ -318,7 +205,7 @@ export default function HomeScreen() {
 
 type CardProps = {
   title: string;
-  children: ReactNode;
+  children: React.ReactNode;
 };
 
 function Card({ title, children }: CardProps) {
@@ -349,10 +236,6 @@ function ActionButton({ label, onPress, disabled }: ActionButtonProps) {
   );
 }
 
-function ButtonRow({ children }: { children: ReactNode }) {
-  return <View style={styles.buttonRow}>{children}</View>;
-}
-
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
@@ -363,16 +246,14 @@ const styles = StyleSheet.create({
     gap: 20,
   },
   title: {
-    fontSize: 28,
+    fontSize: 24,
     fontWeight: '700',
-    textAlign: 'center',
   },
   centered: {
     flex: 1,
     justifyContent: 'center',
   },
   subtitle: {
-    textAlign: 'center',
     color: '#555',
     marginBottom: 4,
   },
@@ -388,7 +269,6 @@ const styles = StyleSheet.create({
   },
   error: {
     color: '#b00020',
-    textAlign: 'center',
   },
   cardTitle: {
     fontSize: 18,
@@ -402,7 +282,7 @@ const styles = StyleSheet.create({
     color: '#777',
   },
   activePlayer: {
-    fontSize: 32,
+    fontSize: 26,
     fontWeight: '700',
   },
   input: {
@@ -431,10 +311,6 @@ const styles = StyleSheet.create({
   },
   badgeText: {
     fontWeight: '600',
-  },
-  buttonRow: {
-    flexDirection: 'row',
-    gap: 10,
   },
   button: {
     borderRadius: 10,
